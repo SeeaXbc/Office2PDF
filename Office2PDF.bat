@@ -4,9 +4,6 @@ REM Office2PDF.bat - Word/ExcelファイルをPDFに変換
 REM ウィンドウタイトルを設定
 title Office to PDF Converter
 
-REM 文字コードをUTF-8に設定（日本語表示用）
-chcp 65001 > nul
-
 REM バッチファイルのディレクトリに移動
 cd /d "%~dp0"
 
@@ -44,12 +41,22 @@ REM PowerShellスクリプトを実行
 REM -ExecutionPolicy Bypass: スクリプト実行ポリシーを一時的に回避
 REM -NoProfile: プロファイルを読み込まない（高速化）
 REM -File: スクリプトファイルを指定
-REM %*: すべての引数（ドロップされたファイル）を渡す
 
 echo 変換対象ファイルを確認しています...
 echo.
 
-powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%~dp0Office2PDF.ps1" %*
+REM 引数を安全に渡すため、一時的な処理
+setlocal enabledelayedexpansion
+set "args="
+:buildargs
+if "%~1"=="" goto :executePS
+set args=!args! "%~1"
+shift
+goto :buildargs
+
+:executePS
+powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%~dp0Office2PDF.ps1" %args%
+endlocal
 
 REM 実行結果を確認できるように一時停止
 echo.

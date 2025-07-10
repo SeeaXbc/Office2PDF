@@ -2,9 +2,15 @@
 # Word/ExcelファイルをPDFに変換するPowerShellスクリプト
 
 param(
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory=$false, ValueFromRemainingArguments=$true)]
     [string[]]$Files = @()
 )
+
+# 引数のデバッグ情報（問題がある場合はコメントを外して確認）
+# Write-Host "受け取った引数数: $($Files.Count)" -ForegroundColor Yellow
+# foreach ($f in $Files) {
+#     Write-Host "引数: $f" -ForegroundColor Yellow
+# }
 
 # 進捗表示用の関数
 function Write-Progress-Message {
@@ -51,11 +57,27 @@ if ($Files.Count -eq 0) {
 # 変換対象ファイルの確認
 $validFiles = @()
 $invalidFiles = @()
+$fileInfoList = @()
 
 foreach ($file in $Files) {
     if (Test-Path $file) {
         if ($file -match '\.(doc|docx|xls|xlsx)$') {
+            $fullPath = (Resolve-Path $file).Path
+            $directory = [System.IO.Path]::GetDirectoryName($fullPath)
+            $fileName = [System.IO.Path]::GetFileName($fullPath)
+            $pdfFolder = Join-Path $directory "PDF"
+            $pdfFileName = [System.IO.Path]::ChangeExtension($fileName, ".pdf")
+            $pdfPath = Join-Path $pdfFolder $pdfFileName
+            
             $validFiles += $file
+            $fileInfoList += @{
+                SourcePath = $fullPath
+                SourceFileName = $fileName
+                PdfFolder = $pdfFolder
+                PdfPath = $pdfPath
+                PdfFileName = $pdfFileName
+                Directory = $directory
+            }
         } else {
             $invalidFiles += $file
         }
@@ -77,7 +99,45 @@ if ($validFiles.Count -eq 0) {
     exit 1
 }
 
-Write-Progress-Message "変換対象: $($validFiles.Count) ファイル" "Info"
+# 変換対象と保存先の表示
+Write-Host "変換対象ファイル:" -ForegroundColor Cyan
+Write-Host ""
+
+# フォルダごとにグループ化して表示
+$groupedFiles = $fileInfoList | Group-Object -Property Directory
+
+foreach ($group in $groupedFiles) {
+    Write-Host "フォルダ: $($group.Name)" -ForegroundColor White
+    Write-Host "保存先 : $($group.Group[0].PdfFolder)" -ForegroundColor Gray
+    Write-Host ""
+    
+    foreach ($fileInfo in $group.Group) {
+        Write-Host "  ・$($fileInfo.SourceFileName)" -ForegroundColor White
+        Write-Host "    → $($fileInfo.PdfFileName)" -ForegroundColor Gray
+        
+        # 既存ファイルのチェック
+        if (Test-Path $fileInfo.PdfPath) {
+            Write-Host "    (既存のファイルを上書きします)" -ForegroundColor Yellow
+        }
+    }
+    Write-Host ""
+}
+
+Write-Host "----------------------------------------" -ForegroundColor DarkGray
+Write-Host "合計: $($validFiles.Count) ファイル" -ForegroundColor Cyan
+Write-Host ""
+
+# 確認プロンプト
+Write-Host "上記のファイルをPDFに変換しますか？" -ForegroundColor Yellow
+$confirmation = Read-Host "実行する場合は 'Y' を、キャンセルする場合は 'N' を入力してください (Y/N)"
+
+if ($confirmation -ne 'Y' -and $confirmation -ne 'y') {
+    Write-Progress-Message "処理をキャンセルしました。" "Warning"
+    exit 0
+}
+
+Write-Host ""
+Write-Progress-Message "変換を開始します..." "Info"
 Write-Host ""
 
 # Office COMオブジェクト
@@ -87,20 +147,33 @@ $successCount = 0
 $errorCount = 0
 
 try {
+    # PDFフォルダの作成
+    $createdFolders = @()
+    foreach ($fileInfo in $fileInfoList) {
+        if (-not (Test-Path $fileInfo.PdfFolder)) {
+            New-Item -ItemType Directory -Path $fileInfo.PdfFolder -Force | Out-Null
+            if ($fileInfo.PdfFolder -notin $createdFolders) {
+                $createdFolders += $fileInfo.PdfFolder
+                Write-Progress-Message "フォルダを作成しました: $($fileInfo.PdfFolder)" "Success"
+            }
+        }
+    }
+    
+    if ($createdFolders.Count -gt 0) {
+        Write-Host ""
+    }
+    
     # 各ファイルを処理
-    for ($i = 0; $i -lt $validFiles.Count; $i++) {
+    for ($i = 0; $i -lt $fileInfoList.Count; $i++) {
+        $fileInfo = $fileInfoList[$i]
         $file = $validFiles[$i]
-        $fileName = [System.IO.Path]::GetFileName($file)
         
         # 進捗表示
-        $progress = [math]::Round(($i / $validFiles.Count) * 100)
-        Write-Progress -Activity "PDF変換中" -Status "処理中: $fileName" -PercentComplete $progress
+        $progress = [math]::Round((($i + 1) / $fileInfoList.Count) * 100)
+        Write-Progress -Activity "PDF変換中" -Status "処理中: $($fileInfo.SourceFileName)" -PercentComplete $progress
         
         try {
-            $filePath = (Resolve-Path $file).Path
-            $pdfPath = [System.IO.Path]::ChangeExtension($filePath, ".pdf")
-            
-            Write-Progress-Message "変換開始: $fileName" "Info"
+            Write-Progress-Message "変換開始: $($fileInfo.SourceFileName)" "Info"
             
             # Word文書の場合
             if ($file -match '\.(doc|docx)$') {
@@ -111,11 +184,18 @@ try {
                     $word.DisplayAlerts = 0  # wdAlertsNone
                 }
                 
-                $doc = $word.Documents.Open($filePath, $false, $true)  # ReadOnly = true
-                $doc.SaveAs2($pdfPath, 17)  # 17 = wdFormatPDF
-                $doc.Close($false)
+                # PDFフォルダの存在を再確認
+                if (-not (Test-Path $fileInfo.PdfFolder)) {
+                    New-Item -ItemType Directory -Path $fileInfo.PdfFolder -Force | Out-Null
+                    Start-Sleep -Milliseconds 500  # フォルダ作成待機
+                }
                 
-                Write-Progress-Message "変換完了: $([System.IO.Path]::GetFileName($pdfPath))" "Success"
+                $doc = $word.Documents.Open($fileInfo.SourcePath, $false, $true)  # ReadOnly = true
+                $doc.SaveAs2($fileInfo.PdfPath, 17)  # 17 = wdFormatPDF
+                $doc.Close($false)
+                [System.Runtime.Interopservices.Marshal]::ReleaseComObject($doc) | Out-Null
+                
+                Write-Progress-Message "変換完了: $($fileInfo.PdfFileName)" "Success"
                 $successCount++
             }
             
@@ -128,30 +208,40 @@ try {
                     $excel.DisplayAlerts = $false
                 }
                 
-                $workbook = $excel.Workbooks.Open($filePath, $false, $true)  # ReadOnly = true
+                # PDFフォルダの存在を再確認
+                if (-not (Test-Path $fileInfo.PdfFolder)) {
+                    New-Item -ItemType Directory -Path $fileInfo.PdfFolder -Force | Out-Null
+                    Start-Sleep -Milliseconds 500  # フォルダ作成待機
+                }
                 
-                # 全シートを1つのPDFに出力
+                # Excelファイルを開く
+                $workbook = $excel.Workbooks.Open($fileInfo.SourcePath, $false, $true)
+                
+                # 全シートを1つのPDFに出力（Workbookから直接エクスポート）
                 $workbook.ExportAsFixedFormat(
-                    0,          # Type: 0 = xlTypePDF
-                    $pdfPath,   # Filename
-                    0,          # Quality: 0 = xlQualityStandard
-                    $true,      # IncludeDocProperties
-                    $false,     # IgnorePrintAreas - falseで印刷範囲を使用
-                    $null,      # From
-                    $null       # To
+                    0,                      # Type: 0 = xlTypePDF
+                    $fileInfo.PdfPath       # Filename
                 )
                 
+                # ワークブックを閉じる
                 $workbook.Close($false)
+                [System.Runtime.Interopservices.Marshal]::ReleaseComObject($workbook) | Out-Null
                 
-                Write-Progress-Message "変換完了: $([System.IO.Path]::GetFileName($pdfPath))" "Success"
+                Write-Progress-Message "変換完了: $($fileInfo.PdfFileName)" "Success"
                 $successCount++
             }
             
         }
         catch {
             $errorCount++
-            Write-Progress-Message "変換失敗: $fileName" "Error"
+            Write-Progress-Message "変換失敗: $($fileInfo.SourceFileName)" "Error"
             Write-Progress-Message "エラー詳細: $($_.Exception.Message)" "Error"
+            
+            # Excelの場合は追加の情報を表示
+            if ($file -match '\.(xls|xlsx)$') {
+                Write-Progress-Message "Excelファイルの変換でエラーが発生しました。" "Error"
+                Write-Progress-Message "印刷設定やシートの内容を確認してください。" "Info"
+            }
         }
     }
     
@@ -190,5 +280,5 @@ Write-Host "  失敗: $errorCount ファイル" -ForegroundColor $(if ($errorCount -gt
 Write-Host ""
 
 if ($successCount -gt 0) {
-    Write-Progress-Message "PDFファイルは元のファイルと同じフォルダに保存されました。" "Success"
+    Write-Progress-Message "PDFファイルは各フォルダ内の'PDF'フォルダに保存されました。" "Success"
 }
